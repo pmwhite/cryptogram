@@ -1,3 +1,4 @@
+Topdirs.dir_directory (Sys.getenv "findlib");;
 #use "topfind";;
 #thread;;
 #require "core";;

@@ -15,5 +15,4 @@ stdenv.mkDerivation {
     core findlib ];
 
   findlib = findlibSiteLib;
-
 }

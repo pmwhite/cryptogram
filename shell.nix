@@ -12,7 +12,7 @@ stdenv.mkDerivation {
   [ ocaml opam camlp4
     utop
     ocamlbuild ocamlgraph
-    core findlib ];
+    core findlib ocpIndent ];
 
   findlib = findlibSiteLib;
 }

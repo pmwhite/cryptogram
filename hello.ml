@@ -1,39 +1,57 @@
 open Printf
 open Core.Std
 
-let stream_filter p stream =
-  let rec next i =
-    try
-      let value = Stream.next stream in
-      if p value then Some value else next i
-    with Stream.Failure -> None in
-  Stream.from next
+type pattern_char =
+  | Ground of char
+  | Wild of int
 
-let stream_take n stream =
-  let num_left = ref n in
-  let rec next i =
-    try
-      let value = Stream.next stream in
-      if !num_left > 0 then (
-        num_left := !num_left - 1;
-        Some value )
-      else None
-    with Stream.Failure -> None in
-  Stream.from next
+type pattern = pattern_char array
 
-let line_stream channel =
-  Stream.from (fun _ -> try Some (input_line channel) with End_of_file -> None)
+let str_to_pattern str legend =
+  let len = String.length str in
+  let result = Array.create len (Wild (-1)) in
+  let str_array = str |> String.to_array in
+  for index = 0 to len-1 do
+    match result.(index) with
+    | Wild -1 -> (
+        let curr_char = str_array.(index) in
+        match Map.find legend curr_char with
+        | Some solution_char -> ()
+        | None -> 
+            for i = index to len-1 do
+              if str_array.(i) = curr_char then result.(i) <- Wild index
+            done)
+    | Wild _ -> ()
+    | Ground _ -> ()
+  done;
+  result |> Array.to_list
+
+let pattern_to_str pattern =
+  pattern |> List.map ~f:(function
+    | Ground c -> Char.uppercase c
+    | Wild i -> Char.of_int_exn (97 + i))
+  |> String.of_char_list
+
+let lines filename = open_in filename |> In_channel.input_lines
+
+let read_crypto str =
+  str |> String.to_list 
+  |> List.filter ~f:(fun c -> Char.is_alpha c || c = ' ')
+  |> List.map ~f:(fun c -> if Char.is_whitespace c then ' 'else c)
+  |> String.of_char_list |> String.split ~on:' '
+
 
 let () =
-  if Array.length Sys.argv = 1 then
-    printf "no args; please give an arg; the arg should be the wordlist filename"
+  if Array.length Sys.argv < 3 then
+    printf "Please pass in at least two arguments"
   else
-    let filename = Sys.argv.(1) in
-    let file_channel = open_in filename in
-    printf "Word file: %s\n" filename;
-    let first_ten = stream_take 2000 (line_stream file_channel) in
-    let count = ref 0 in
-    Stream.iter (fun line -> 
-      count := !count + 1;
-      if !count mod 100000 = 0 then
-        printf "%s\n" line;) (line_stream file_channel)
+    printf "loading dictionary...\n%!";
+    let wordlist = lines Sys.argv.(1) in
+    printf "dictionary loaded.\n%!";
+    match Sys.argv.(2) |> lines |> List.hd with
+    | None -> failwith "Cryptogram file is empty"
+    | Some str ->
+        let legend = Map.empty Char.comparator in
+        let patterns = wordlist |> Sequence.of_list |> Sequence.map ~f:(fun word -> str_to_pattern word legend) in
+        Sequence.iteri patterns ~f:(fun i pattern -> 
+          if i mod 100000 = 0 then printf "%s\n%!" (pattern_to_str pattern););

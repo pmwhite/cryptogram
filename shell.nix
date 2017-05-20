@@ -10,9 +10,9 @@ stdenv.mkDerivation {
 
   buildInputs = with ocamlPackages;
   [ ocaml opam camlp4
-    utop
-    ocamlbuild ocamlgraph
-    core findlib ocpIndent ];
+    utop ocamlbuild ocamlgraph
+    core core_extended findlib 
+    ocpIndent containers ];
 
   findlib = findlibSiteLib;
 }

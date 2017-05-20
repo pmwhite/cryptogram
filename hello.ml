@@ -98,50 +98,25 @@ end
 module Wordlist : sig
   type t
   val empty : t
-  val cons : string -> t -> t
   val filter : t -> f:(string -> bool) -> t
   val of_list : string list -> t
-  val to_list : t -> string list
-  val partition_index : int -> t -> t array
-  val length : t -> int
+  val to_seq : t -> string Sequence.t
 end = struct
-  type t = { length : int; items : string list }
+  type t = string Sequence.t
 
-  let empty = { length = 0; items = [] }
+  let empty = Sequence.empty
 
-  let filter { items; _ } ~f =
-    let rec filter' ({length; items} as acc) = function
-      | head::tail -> 
-          if f head then
-            filter' { length = length + 1; items = head::items } tail
-          else filter' acc tail
-      | [] -> acc in
-    filter' empty items
+  let filter = Sequence.filter
 
-
-  let cons word { length; items } = {length = length + 1; items = word::items }
-
-  let of_list words = { length = List.length words; items = words }
-  let to_list { items; _ } = items
-
-  let partition_index i { items; _ } = 
-    let result = Array.create 26 empty in
-    List.iter ~f:(fun word ->
-      let index = (Char.to_int (String.get word i)) - 97 in
-      result.(index) <- cons word result.(index)) items;
-    result
-
-  let length { length; _ } = length
+  let of_list = Sequence.of_list
+  let to_seq = ident
 end
 
 module Potential : sig
   type t
   val init : string list -> (Pattern.t, string list, Pattern.comparator_witness) Map.t -> t
-  val expand_on_char : char -> t -> t list
   val trim : Translation.t -> t -> t
-  val quantify : t -> int
-  val remove_smart : t -> ((string * Wordlist.t) * t) option
-  val solve : t -> Translation.t list
+  val solve : t -> Translation.t Sequence.t
 end = struct
   type t = (string * Wordlist.t) list
 
@@ -151,49 +126,21 @@ end = struct
     |> List.map ~f:(fun word -> 
         (word, Map.find_exn pattern_data (Pattern.of_str word) |> Wordlist.of_list))
 
-  let expand_char_word c (word, candidates) =
-    match String.index word c with
-    | Some i -> (word, Wordlist.partition_index i candidates)
-    | None -> (word, Array.create ~len:26 candidates)
-
-  let expand_on_char c potential =
-    let partitioned_data = List.map potential ~f:(expand_char_word c) in
-    List.range 0 26
-    |> List.map ~f:(fun letter_num ->
-        List.map partitioned_data ~f:(fun (word, partitioned_candidates) ->
-          word, partitioned_candidates.(letter_num)))
-
-  let quantify potential =
-    potential
-    |> List.map ~f:(fun (_, candidates) -> Wordlist.length candidates)
-    |> List.sort ~cmp:Int.compare
-    |> (fun l -> List.take l 2)
-    |> List.fold ~f:( * ) ~init:1
-
   let trim translation potential =
     List.map potential ~f:(fun (crypto, candidates) -> 
       (crypto, Wordlist.filter candidates ~f:(Translation.consistent translation crypto)))
 
-  let remove_smart potential =
-    let min_entry = 
-      List.min_elt potential ~cmp:(fun (_, one) (_, two) -> 
-        Int.compare (Wordlist.length one) (Wordlist.length two)) in
-    Option.map min_entry (fun ((min_word, candidates) as result) ->
-      (result, List.Assoc.remove potential min_word))
-
   let solve potential =
-    let rec solve' potential =
-      let least : ((string * Wordlist.t) * t) option = remove_smart potential in
-      match least with
-      | Some ((min_word, candidates), tail) ->
-          Wordlist.to_list candidates
-          |> List.map ~f:(fun curr_candidate ->
+    let rec solve' = function
+      | (min_word, candidates)::tail ->
+          Wordlist.to_seq candidates
+          |> Sequence.map ~f:(fun curr_candidate ->
             let curr_translation = Translation.from_words min_word curr_candidate in
             let trimmed_tail = trim curr_translation tail in
             let solved = solve' trimmed_tail in
-            List.map solved ~f:(Translation.overlay curr_translation)) |> List.concat
-      | None -> [Translation.empty] in
-    solve' potential
+            Sequence.map solved ~f:(Translation.overlay curr_translation)) |> Sequence.concat
+      | [] -> Sequence.singleton Translation.empty in
+    solve' (List.sort potential ~cmp:(fun (word1, _) (word2, _) -> Int.compare (String.length word2) (String.length word1)))
 end
 
 let crypto_words str = 
@@ -207,45 +154,25 @@ let load_cryptogram filename =
   |> List.hd_exn
   |> crypto_words
 
-
 let load_pattern_data filename =
   open_in filename
   |> In_channel.input_lines
   |> List.map ~f:(fun item -> (Pattern.of_str item, item)) 
   |> Map.of_alist_multi ~comparator:Pattern.comparator
 
-let character_counts crypto = 
-  List.range 97 (97 + 26) |> List.map ~f:Char.of_int_exn
-  |> List.map ~f:(fun c ->
-      (c, List.count crypto ~f:(fun word -> String.contains word c)))
-  |> List.filter ~f:(fun (c, count) -> count > 1)
-  |> List.sort ~cmp:(fun (c1, count1) (c2, count2) -> Int.compare count2 count1)
-
 let solve_cryptogram crypto pattern_data =
   let initial_potential = Potential.init crypto pattern_data in
-  printf "good\n%!";
-  let common_letters = List.take (character_counts crypto) 2 in
-  printf "good\n%!";
-  let expanded_potentials =
-    common_letters
-    |> List.fold ~f:(fun potentials (letter, _) -> 
-        List.map potentials ~f:(Potential.expand_on_char letter)
-        |> List.concat) ~init:[initial_potential] in
-  printf "good\n%!";
-  let translations = 
-    List.map [initial_potential] ~f:(fun p -> 
-      printf "solving potential: %i\n%!" (Potential.quantify p);
-      Potential.solve p) |> List.concat in
-  List.map translations ~f:(fun translation ->
+  let translations = Potential.solve initial_potential in
+  Sequence.map translations ~f:(fun translation ->
     List.map crypto ~f:(String.map ~f:(Translation.decrypt translation)))
 
 let () =
   let pattern_data = load_pattern_data "words.txt" in
   printf "pattern data created\n%!";
-  for i = 0 to 0 do
+  for i = 0 to 10 do
     printf "%i>" i;
     let words = read_line () |> crypto_words in
     let solutions = solve_cryptogram words pattern_data in
-    let solution_lines = solutions |> List.map ~f:(String.concat ~sep:" ") in
-    List.iter solution_lines ~f:(printf "%s\n%!")
+    let solution_lines = solutions |> Sequence.map ~f:(String.concat ~sep:" ") in
+    (*Sequence.take solution_lines 10 |>*)  Sequence.iter solution_lines ~f:(printf "%s\n%!")
   done

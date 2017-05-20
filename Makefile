@@ -1,12 +1,11 @@
 hello.byte: hello.ml
-	ocamlbuild hello.byte -use-ocamlfind -package core -package containers -tag thread
+	ocamlbuild hello.byte -use-ocamlfind -package core -tag thread
 
 hello.native: hello.ml
-	ocamlbuild hello.native -use-ocamlfind -package core -package containers -tag thread
+	ocamlbuild hello.native -use-ocamlfind -package core -tag thread
 
 hello.profile: hello.ml
-	ocamlbuild hello.byte -use-ocamlfind -package core -tag thread -ocamlc ocaml
-
+	ocamlbuild hello.byte -use-ocamlfind -package core -tag thread -ocamlc ocamlcp
 
 .PHONY: run
 run: hello.byte

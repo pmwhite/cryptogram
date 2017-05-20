@@ -117,6 +117,7 @@ module Potential : sig
   val init : string list -> (Pattern.t, string list, Pattern.comparator_witness) Map.t -> t
   val trim : Translation.t -> t -> t
   val solve : t -> Translation.t Sequence.t
+  val order_by_effect : t -> t
 end = struct
   type t = (string * Wordlist.t) list
 
@@ -130,6 +131,27 @@ end = struct
     List.map potential ~f:(fun (crypto, candidates) -> 
       (crypto, Wordlist.filter candidates ~f:(Translation.consistent translation crypto)))
 
+  let order_by_effect potential =
+    let rec order' words used =
+      let set = Set.of_list words ~comparator:String.comparator in
+      let effects : (string * int) list = Set.map set ~f:(fun word -> 
+        let rest = Set.remove set word in
+        let str = 
+          Set.to_list rest |> String.concat 
+          |> String.filter ~f:(String.contains (word ^ used)) in
+        let effect = 
+          String.fold word ~init:0 ~f:(fun total c -> 
+            total + (String.count str ~f:((=) c))) in
+        (word, effect)) ~comparator:Comparator.Poly.comparator |> Set.to_list in
+      match List.max_elt effects ~cmp:(fun (w1, e1) (w2,e2) -> Int.compare e1 e2) with
+      | Some (max_word, max_effect) ->
+          let rest = List.Assoc.remove effects max_word |> List.map ~f:fst in
+          max_word::(order' rest (max_word ^ used))
+      | None -> [] in
+    let words = List.map potential ~f:fst in
+    let orderered_words = order' words "" in
+    List.map orderered_words ~f:(fun word -> (word, List.Assoc.find_exn potential word))
+
   let solve potential =
     let rec solve' = function
       | (min_word, candidates)::tail ->
@@ -140,7 +162,8 @@ end = struct
             let solved = solve' trimmed_tail in
             Sequence.map solved ~f:(Translation.overlay curr_translation)) |> Sequence.concat
       | [] -> Sequence.singleton Translation.empty in
-    solve' (List.sort potential ~cmp:(fun (word1, _) (word2, _) -> Int.compare (String.length word2) (String.length word1)))
+    solve' (order_by_effect potential)
+
 end
 
 let crypto_words str = 
@@ -160,6 +183,12 @@ let load_pattern_data filename =
   |> List.map ~f:(fun item -> (Pattern.of_str item, item)) 
   |> Map.of_alist_multi ~comparator:Pattern.comparator
 
+let load_counts filename =
+  open_in filename
+  |> In_channel.input_lines
+  |> List.mapi ~f:(fun i item -> (item, i))
+  |> Map.of_alist_exn ~comparator:String.comparator
+
 let solve_cryptogram crypto pattern_data =
   let initial_potential = Potential.init crypto pattern_data in
   let translations = Potential.solve initial_potential in
@@ -168,11 +197,16 @@ let solve_cryptogram crypto pattern_data =
 
 let () =
   let pattern_data = load_pattern_data "words.txt" in
-  printf "pattern data created\n%!";
-  for i = 0 to 10 do
-    printf "%i>" i;
-    let words = read_line () |> crypto_words in
-    let solutions = solve_cryptogram words pattern_data in
-    let solution_lines = solutions |> Sequence.map ~f:(String.concat ~sep:" ") in
-    (*Sequence.take solution_lines 10 |>*)  Sequence.iter solution_lines ~f:(printf "%s\n%!")
-  done
+  let counts = load_counts "words.txt" in
+  printf "dictionary loaded\n%!";
+  let words = read_line () |> crypto_words in
+  let tolerance = 100 in
+  solve_cryptogram words pattern_data
+  |> Sequence.fold ~init:(Int.max_value - tolerance) ~f:(fun least solution ->
+      let solution_str = String.concat solution ~sep: " " in
+      let count = 
+        List.map solution ~f:(Map.find_exn counts)
+        |> List.fold ~init:0 ~f:(+) in
+      if count < least + tolerance then printf "%s\n%!" solution_str;
+      min least count)
+  |> ignore

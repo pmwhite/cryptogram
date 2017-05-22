@@ -33,103 +33,187 @@ end = struct
   end)
 end
 
+module Letter_map : sig
+  type 'a t = 'a option array
+  val empty : unit -> 'a t
+  val get : char -> 'a t -> 'a option
+  val get_exn : char -> 'a t -> 'a
+  val set : char -> 'a -> 'a t -> unit
+  val overlay : 'a t -> 'a t -> 'a t
+  val to_seq : 'a t -> (char * 'a) Sequence.t
+end = struct
+  type 'a t = 'a option array
+
+  let empty () = Array.create ~len:26 None
+
+  let num_of_char c = Char.to_int c - 97
+  let char_of_num i = Char.of_int_exn (i + 97)
+
+  let get c letter_map =
+    letter_map.(num_of_char c)
+
+  let get_exn c letter_map = Option.value_exn (get c letter_map)
+
+  let set c x letter_map =
+    letter_map.(num_of_char c) <- Some x
+
+  let overlay bottom top =
+    let result = Array.copy bottom in
+    Array.iteri top ~f:(fun i value ->
+      match value with
+      | (Some _) -> result.(i) <- value
+      | None -> ());
+    result
+
+
+  let to_seq letter_map =
+    letter_map |> Array.to_sequence |> Sequence.filter_mapi ~f:(fun i x -> 
+      Option.map x ~f:(fun item -> (char_of_num i, item)))
+end
+
 module Translation : sig
   type t
   val empty : t
   val overlay : t -> t -> t
   val from_words : string -> string -> t
-  val consistent : t -> string -> string -> bool
-  val decrypt : t -> char -> char
+  val decrypt : t -> char -> char option
+  val decrypt_exn : t -> char -> char
+  val encrypt : t -> char -> char option
+  val encrypt_exn : t -> char -> char
 end = struct
 
   type t = {
-    decrypt : int array;
-    encrypt : int array;
+    decrypt : char Letter_map.t;
+    encrypt : char Letter_map.t;
   }
 
   let empty = {
-    encrypt = Array.create ~len:26 (-1);
-    decrypt = Array.create ~len:26 (-1)
+    encrypt = Letter_map.empty ();
+    decrypt = Letter_map.empty ()
   }
 
   let overlay original top =
-    let original =
-      { decrypt = Array.copy original.decrypt;
-        encrypt = Array.copy original.encrypt } in
-    Array.iteri top.decrypt ~f:(fun i value ->
-      if value <> -1 then original.decrypt.(i) <- value;);
-    Array.iteri top.encrypt ~f:(fun i value ->
-      if value <> -1 then original.encrypt.(i) <- value;);
-    original
-
-  let num_of_char c = Char.to_int c - 97
-  let char_of_num i = Char.of_int_exn (i + 97)
+    { decrypt = Letter_map.overlay original.decrypt top.decrypt
+    ; encrypt = Letter_map.overlay original.encrypt top.encrypt }
 
   let from_words crypto candidate =
-      let decrypt_array = Array.create ~len:26 (-1) in
-      let encrypt_array = Array.create ~len:26 (-1) in
-      for i = 0 to String.length crypto - 1 do
-        let crypt_char_num = num_of_char (String.get crypto i) in
-        let cand_char_num = num_of_char (String.get candidate i) in
-        decrypt_array.(crypt_char_num) <- cand_char_num;
-        encrypt_array.(cand_char_num) <- crypt_char_num;
-      done;
-      { decrypt = decrypt_array; encrypt = encrypt_array }
-
-  let consistent translation crypto candidate =
-    let good = ref true in
+    let decrypt_map = Letter_map.empty () in
+    let encrypt_map = Letter_map.empty () in
     for i = 0 to String.length crypto - 1 do
-      let crypt_char_num = num_of_char (String.get crypto i) in
-      let cand_char_num = num_of_char (String.get candidate i) in
-      if !good then (
-        good :=
-          match (translation.decrypt.(crypt_char_num), translation.encrypt.(cand_char_num)) with
-          | (-1, -1) -> true
-          | (-1, encrypted) when encrypted = crypt_char_num -> true
-          | (decrypted, -1) when decrypted = cand_char_num -> true
-          | (decrypted, encrypted) when decrypted = cand_char_num && encrypted = crypt_char_num -> true
-          | (_, _) -> false;)
+      let crypto_char = String.get crypto i in
+      let cand_char = String.get candidate i in
+      decrypt_map |> Letter_map.set crypto_char cand_char;
+      encrypt_map |> Letter_map.set cand_char crypto_char
     done;
-    !good
+    { decrypt = decrypt_map; encrypt = encrypt_map }
 
-  let decrypt translation c = char_of_num translation.decrypt.(num_of_char c)
+  let decrypt { decrypt; _ } c = Letter_map.get c decrypt
+  let decrypt_exn { decrypt; _ } c = Letter_map.get_exn c decrypt
+  let encrypt { encrypt; _ } c = Letter_map.get c encrypt
+  let encrypt_exn { encrypt; _ } c = Letter_map.get_exn c encrypt
 end
 
-module Wordlist : sig
-  type t
-  val empty : t
-  val filter : t -> f:(string -> bool) -> t
-  val of_list : string list -> t
+module Candidate_set : sig
+  type tree = 
+    | Prefix of char * tree Letter_map.t 
+    | Leaf of string
+
+  type t = {
+    candidates : tree;
+    word : string;
+    translation : Translation.t }
+  val trim_with : Translation.t -> t -> t
+  val singleton : string -> string -> t
+  val of_word_and_list : string -> string list -> t
   val to_seq : t -> string Sequence.t
+  val crypto_word : t -> string
 end = struct
-  type t = string Sequence.t
 
-  let empty = Sequence.empty
+  (** A prefix tree for efficienty storing and filtering candidate decryptions
+   * for particular words.  Each node has the character of the word being
+   * decrypted along; in addition, each node contains a mapping between actual
+   * decrypted characters and the next nodes of the tree. This mapping is just
+   * a simple prefix tree, while the character of the crypto-word is only there
+   * because this is a cryptogram solver.
+   *)
+  type tree = 
+    | Prefix of char * tree Letter_map.t 
+    | Leaf of string
 
-  let filter = Sequence.filter
+  type t = {
+    candidates : tree;
+    word : string;
+    translation : Translation.t }
 
-  let of_list = Sequence.of_list
-  let to_seq = ident
+  let trim_with next_translation ({ translation; _ } as c_set) =
+    { c_set with translation = Translation.overlay translation next_translation }
+
+  let rec to_seq ({ translation; candidates; word } as c_set) =
+    match candidates with
+    | Prefix (curr_crypto_char, map) -> (
+        match Translation.decrypt translation curr_crypto_char with
+        | Some c -> to_seq { c_set with candidates = Letter_map.get_exn c map }
+        | None ->
+            map |> Letter_map.to_seq
+            |> Sequence.filter_map ~f:(fun (c, tree) ->
+                match Translation.encrypt translation c with
+                | Some crypto_char when crypto_char <> curr_crypto_char -> None
+                | None -> None
+                | Some _ -> Some (to_seq { c_set with candidates = tree }))
+            |> Sequence.concat)
+    | Leaf word -> Sequence.singleton word
+
+  let singleton_tree crypto_chars cand_chars candidate =
+    List.zip_exn crypto_chars cand_chars
+    |> List.fold_right ~init:(Leaf candidate) ~f:(fun (crypto_char, cand_char) acc -> 
+      let letter_map = Letter_map.empty () in
+      Letter_map.set cand_char acc letter_map;
+      Prefix (crypto_char, letter_map))
+
+  let singleton crypto candidate = {
+    candidates = singleton_tree (String.to_list crypto) (String.to_list candidate) candidate;
+    word = crypto;
+    translation = Translation.empty }
+
+  let add_candidate { word; candidates; _ } candidate =
+    let cand_chars = String.to_list candidate in
+    let crypto_chars = String.to_list word in
+    let rec add_candidate' tree crypto_chars cand_chars =
+      match (tree, cand_chars, crypto_chars) with
+      | (Prefix(_, letter_map), cand_hd::cand_tl, crypto_hd::crypto_tl) ->
+          (match Letter_map.get cand_hd letter_map with
+          | Some next_tree -> add_candidate' next_tree crypto_tl cand_tl
+          | None -> letter_map |> Letter_map.set cand_hd (singleton_tree crypto_tl cand_tl candidate))
+      | _ -> failwith (sprintf "bad candidate: word %s; cand %s; word_p %s; cand_p %s" word candidate (String.of_char_list crypto_chars) (String.of_char_list cand_chars)) in
+    add_candidate' candidates crypto_chars cand_chars
+
+  let of_word_and_list crypto candidates =
+    match candidates with
+    | hd::tl ->
+        let result : t = singleton crypto hd in
+        List.iter tl ~f:(add_candidate result);
+        result
+    | [] -> failwith "cannot make a Candidate_set without any candidate words."
+
+  let crypto_word { word; _ } = word
 end
 
 module Potential : sig
   type t
   val init : string list -> (Pattern.t, string list, Pattern.comparator_witness) Map.t -> t
-  val trim : Translation.t -> t -> t
+  val trim_with : Translation.t -> t -> t
   val solve : t -> Translation.t Sequence.t
   val order_by_effect : t -> t
 end = struct
-  type t = (string * Wordlist.t) list
+  type t = Candidate_set.t list
 
   let init words pattern_data =
     words
     |> List.dedup
     |> List.map ~f:(fun word -> 
-        (word, Map.find_exn pattern_data (Pattern.of_str word) |> Wordlist.of_list))
+        Map.find_exn pattern_data (Pattern.of_str word) |> Candidate_set.of_word_and_list word)
 
-  let trim translation potential =
-    List.map potential ~f:(fun (crypto, candidates) -> 
-      (crypto, Wordlist.filter candidates ~f:(Translation.consistent translation crypto)))
+  let trim_with translation potential = List.map potential ~f:(Candidate_set.trim_with translation)
 
   let order_by_effect potential =
     let rec order' words used =
@@ -148,22 +232,24 @@ end = struct
           let rest = List.Assoc.remove effects max_word |> List.map ~f:fst in
           max_word::(order' rest (max_word ^ used))
       | None -> [] in
-    let words = List.map potential ~f:fst in
+    let words = List.map potential ~f:Candidate_set.crypto_word in
     let orderered_words = order' words "" in
-    List.map orderered_words ~f:(fun word -> (word, List.Assoc.find_exn potential word))
+    List.map orderered_words ~f:(fun word -> 
+      List.find_exn potential ~f:(fun c_set ->
+          Candidate_set.crypto_word c_set = word))
 
   let solve potential =
     let rec solve' = function
-      | (min_word, candidates)::tail ->
-          Wordlist.to_seq candidates
+      | c_set::tail ->
+          let min_word = Candidate_set.crypto_word c_set in
+          Candidate_set.to_seq c_set
           |> Sequence.map ~f:(fun curr_candidate ->
             let curr_translation = Translation.from_words min_word curr_candidate in
-            let trimmed_tail = trim curr_translation tail in
+            let trimmed_tail = trim_with curr_translation tail in
             let solved = solve' trimmed_tail in
             Sequence.map solved ~f:(Translation.overlay curr_translation)) |> Sequence.concat
       | [] -> Sequence.singleton Translation.empty in
     solve' (order_by_effect potential)
-
 end
 
 let crypto_words str = 
@@ -193,7 +279,7 @@ let solve_cryptogram crypto pattern_data =
   let initial_potential = Potential.init crypto pattern_data in
   let translations = Potential.solve initial_potential in
   Sequence.map translations ~f:(fun translation ->
-    List.map crypto ~f:(String.map ~f:(Translation.decrypt translation)))
+    List.map crypto ~f:(String.map ~f:(Translation.decrypt_exn translation)))
 
 let () =
   let pattern_data = load_pattern_data "words.txt" in

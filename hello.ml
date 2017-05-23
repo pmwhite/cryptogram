@@ -72,7 +72,10 @@ end = struct
 end
 
 module Translation : sig
-  type t
+  type t = {
+    decrypt : char Letter_map.t;
+    encrypt : char Letter_map.t;
+  }
   val empty : t
   val overlay : t -> t -> t
   val from_words : string -> string -> t
@@ -152,14 +155,16 @@ end = struct
     match candidates with
     | Prefix (curr_crypto_char, map) -> (
         match Translation.decrypt translation curr_crypto_char with
-        | Some c -> to_seq { c_set with candidates = Letter_map.get_exn c map }
+        | Some c -> 
+            (match Letter_map.get c map with
+            | Some next_tree -> to_seq { c_set with candidates = next_tree }
+            | None -> Sequence.empty)
         | None ->
             map |> Letter_map.to_seq
             |> Sequence.filter_map ~f:(fun (c, tree) ->
                 match Translation.encrypt translation c with
                 | Some crypto_char when crypto_char <> curr_crypto_char -> None
-                | None -> None
-                | Some _ -> Some (to_seq { c_set with candidates = tree }))
+                | None | Some _ -> Some (to_seq { c_set with candidates = tree }))
             |> Sequence.concat)
     | Leaf word -> Sequence.singleton word
 
@@ -175,7 +180,7 @@ end = struct
     word = crypto;
     translation = Translation.empty }
 
-  let add_candidate { word; candidates; _ } candidate =
+  let add_candidate { word; candidates; translation } candidate =
     let cand_chars = String.to_list candidate in
     let crypto_chars = String.to_list word in
     let rec add_candidate' tree crypto_chars cand_chars =
@@ -277,6 +282,7 @@ let load_counts filename =
 
 let solve_cryptogram crypto pattern_data =
   let initial_potential = Potential.init crypto pattern_data in
+  
   let translations = Potential.solve initial_potential in
   Sequence.map translations ~f:(fun translation ->
     List.map crypto ~f:(String.map ~f:(Translation.decrypt_exn translation)))

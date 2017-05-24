@@ -1,19 +1,45 @@
 open Printf
 open Core.Std
 
+(** Interface for dealing with patterns. Patterns represent how
+ * characters are repeated and what positions they are in; the actual
+ * characters themselves are inconsequential, only the repetitions are
+ * important. For example, 'this' and 'that' have the same patterns because
+ * they both have 4 different letters. 'hello' and 'patty' have the same
+ * patterns because they have repeated letters in the same positions.*)
 module Pattern : sig
+  (** A pattern *)
   type t
+
+  (** Gets the pattern for a specified string. *)
   val of_str : string -> t
+
+  (** Gets a string which has the same pattern as the given pattern. Since many
+   * strings can have the same pattern, there are many possible correct outputs
+   * for this function. Generally, this function will give an output of the
+   * form "abcd" or "abbcd", but no guaruntees are made here. *)
   val to_str : t -> string
+
+  (** Type for creating comparison-based containers of patterns. *)
   type comparator_witness
+
+  (** A comparator for creating comparison-based containers of patterns. *)
   val comparator : (t, comparator_witness) Comparator.t
+
 end = struct
+
+  (* Patterns are represented as int arrays. Each character is mapped to the
+   * index at which it first occured. So "therefore" is mapped to
+   * [|0;1;2;3;2;5;6;3;8|]. Note that the numbers 4 and 7 are skipped. *)
   type t = int array
 
   let of_str str =
     let len = String.length str in
     let result = Array.create len (-1) in
+    (* For each character that hasn't been touched set every subsequent
+     * occurence of the character to the index of the current character. *)
     for index = 0 to len-1 do
+      (* A -1 in the result array signifies that a character hasn't been set yet. *)
       if result.(index) = -1 then (
         for i = index to len-1 do
           if String.get str i = String.get str index then 
@@ -22,9 +48,18 @@ end = struct
     done;
     result
 
-  let to_str t =
-    t |> Array.map ~f:Char.of_int_exn |> Array.to_list |> String.of_char_list
+  (* Map each number to its letter equivalent. 0 gets translated to 'a', 1 gets
+   * translated to 'b', etc. Thus, the stringified pattern for "therefore" is
+   * "abcdcfgdi". Note that 'e' and 'h' are skipped just as 4 and 7 are
+   * skipped. *)
+  let to_str t = 
+    t 
+    |> Array.map ~f:(fun i -> Char.of_int_exn (i + 97)) 
+    |> Array.to_list |> String.of_char_list
 
+  (* A simple comparator for patterns. The implementation piggybacks off of
+   * Array and Integer implementations because we don't care too much about how
+   * patterns are compared. *)
   include Comparator.Make(struct
     type t = int array
     let sexp_of_t = Array.sexp_of_t Int.sexp_of_t
@@ -33,12 +68,30 @@ end = struct
   end)
 end
 
+(** Operations on letter maps. One could use actual maps keyed on characters,
+ * but these should be faster because we know that there are a maximum of 26
+ * possible letters and we can get O(1) access for a specific letter. This
+ * module is here mostly for performance reasons, as well as a little bit of
+ * convenience. *)
 module Letter_map : sig
-  type 'a t = 'a option array
+  (** A letter map which stores items of type 'a *)
+  type 'a t
+
+  (** Creates and empty letter map *)
   val empty : unit -> 'a t
+
+  (** Gets the value associated with the given character. The character may not
+   * have an associated value, so an option is returned *)
   val get : char -> 'a t -> 'a option
+
+  (** Gets the value associated with the given character, assuming the
+   * character is in the map. *)
   val get_exn : char -> 'a t -> 'a
+
+  (** Mutation of a value in the map; use with care. This function will modify all copies of the letter map. Best used on letter maps created using `empty` because you know there are no copies. *)
   val set : char -> 'a -> 'a t -> unit
+
+  (** Union of the two letter maps. *)
   val overlay : 'a t -> 'a t -> 'a t
   val to_seq : 'a t -> (char * 'a) Sequence.t
 end = struct
@@ -72,10 +125,7 @@ end = struct
 end
 
 module Translation : sig
-  type t = {
-    decrypt : char Letter_map.t;
-    encrypt : char Letter_map.t;
-  }
+  type t
   val empty : t
   val overlay : t -> t -> t
   val from_words : string -> string -> t
@@ -117,14 +167,7 @@ end = struct
 end
 
 module Candidate_set : sig
-  type tree = 
-    | Prefix of char * tree Letter_map.t 
-    | Leaf of string
-
-  type t = {
-    candidates : tree;
-    word : string;
-    translation : Translation.t }
+  type t
   val trim_with : Translation.t -> t -> t
   val singleton : string -> string -> t
   val of_word_and_list : string -> string list -> t
@@ -282,7 +325,6 @@ let load_counts filename =
 
 let solve_cryptogram crypto pattern_data =
   let initial_potential = Potential.init crypto pattern_data in
-  
   let translations = Potential.solve initial_potential in
   Sequence.map translations ~f:(fun translation ->
     List.map crypto ~f:(String.map ~f:(Translation.decrypt_exn translation)))
@@ -299,6 +341,6 @@ let () =
       let count = 
         List.map solution ~f:(Map.find_exn counts)
         |> List.fold ~init:0 ~f:(+) in
-      if count < least + tolerance then printf "%s\n%!" solution_str;
+      if count < least + tolerance then printf "%s: %d\n%!" solution_str count;
       min least count)
   |> ignore

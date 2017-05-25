@@ -1,8 +1,7 @@
 open Printf
 open Core.Std
 
-(** Interface for dealing with patterns. Patterns represent how
- * characters are repeated and what positions they are in; the actual
+(** Interface for dealing with patterns. Patterns represent how * characters are repeated and what positions they are in; the actual
  * characters themselves are inconsequential, only the repetitions are
  * important. For example, 'this' and 'that' have the same patterns because
  * they both have 4 different letters. 'hello' and 'patty' have the same
@@ -93,6 +92,8 @@ module Letter_map : sig
 
   (** Union of the two letter maps. *)
   val overlay : 'a t -> 'a t -> 'a t
+
+  (** Get a sequence of the key-value pairs of the letter map *)
   val to_seq : 'a t -> (char * 'a) Sequence.t
 end = struct
   type 'a t = 'a option array

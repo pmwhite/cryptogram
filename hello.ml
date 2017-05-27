@@ -8,10 +8,7 @@ open Core.Std
  * patterns because they have repeated letters in the same positions.*)
 module Pattern : sig
   (** A pattern *)
-  type t
-
-  (** Gets the pattern for a specified string. *)
-  val of_str : string -> t
+  type t (** Gets the pattern for a specified string. *) val of_str : string -> t
 
   (** Gets a string which has the same pattern as the given pattern. Since many
    * strings can have the same pattern, there are many possible correct outputs
@@ -136,35 +133,30 @@ module Translation : sig
   val encrypt_exn : t -> char -> char
 end = struct
 
-  type t = {
-    decrypt : char Letter_map.t;
-    encrypt : char Letter_map.t;
-  }
+  type t = (char * char) list
 
-  let empty = {
-    encrypt = Letter_map.empty ();
-    decrypt = Letter_map.empty ()
-  }
+  let empty = []
 
-  let overlay original top =
-    { decrypt = Letter_map.overlay original.decrypt top.decrypt
-    ; encrypt = Letter_map.overlay original.encrypt top.encrypt }
+  let overlay original top = List.append top original
 
-  let from_words crypto candidate =
-    let decrypt_map = Letter_map.empty () in
-    let encrypt_map = Letter_map.empty () in
-    for i = 0 to String.length crypto - 1 do
-      let crypto_char = String.get crypto i in
-      let cand_char = String.get candidate i in
-      decrypt_map |> Letter_map.set crypto_char cand_char;
-      encrypt_map |> Letter_map.set cand_char crypto_char
-    done;
-    { decrypt = decrypt_map; encrypt = encrypt_map }
+  let from_words crypto candidate = 
+    List.zip_exn (String.to_list crypto) (String.to_list candidate)
 
-  let decrypt { decrypt; _ } c = Letter_map.get c decrypt
-  let decrypt_exn { decrypt; _ } c = Letter_map.get_exn c decrypt
-  let encrypt { encrypt; _ } c = Letter_map.get c encrypt
-  let encrypt_exn { encrypt; _ } c = Letter_map.get_exn c encrypt
+  let decrypt translation c =
+    List.find translation ~f:(fun (crypto_char, cand_char) -> crypto_char = c)
+    |> Option.map ~f:snd
+
+  let decrypt_exn translation c =
+    List.find_exn translation ~f:(fun (crypto_char, cand_char) -> crypto_char = c)
+    |> snd
+
+  let encrypt translation c =
+    List.find translation ~f:(fun (crypto_char, cand_char) -> cand_char = c)
+    |> Option.map ~f:fst
+
+  let encrypt_exn translation c =
+    List.find_exn translation ~f:(fun (crypto_char, cand_char) -> cand_char = c)
+    |> fst
 end
 
 module Candidate_set : sig

@@ -64,64 +64,6 @@ end = struct
   end)
 end
 
-(** Operations on letter maps. One could use actual maps keyed on characters,
- * but these should be faster because we know that there are a maximum of 26
- * possible letters and we can get O(1) access for a specific letter. This
- * module is here mostly for performance reasons, as well as a little bit of
- * convenience. *)
-module Letter_map : sig
-  (** A letter map which stores items of type 'a *)
-  type 'a t
-
-  (** Creates and empty letter map *)
-  val empty : unit -> 'a t
-
-  (** Gets the value associated with the given character. The character may not
-   * have an associated value, so an option is returned *)
-  val get : char -> 'a t -> 'a option
-
-  (** Gets the value associated with the given character, assuming the
-   * character is in the map. *)
-  val get_exn : char -> 'a t -> 'a
-
-  (** Mutation of a value in the map; use with care. This function will modify all copies of the letter map. Best used on letter maps created using `empty` because you know there are no copies. *)
-  val set : char -> 'a -> 'a t -> unit
-
-  (** Union of the two letter maps. *)
-  val overlay : 'a t -> 'a t -> 'a t
-
-  (** Get a sequence of the key-value pairs of the letter map *)
-  val to_seq : 'a t -> (char * 'a) Sequence.t
-end = struct
-  type 'a t = 'a option array
-
-  let empty () = Array.create ~len:26 None
-
-  let num_of_char c = Char.to_int c - 97
-  let char_of_num i = Char.of_int_exn (i + 97)
-
-  let get c letter_map =
-    letter_map.(num_of_char c)
-
-  let get_exn c letter_map = Option.value_exn (get c letter_map)
-
-  let set c x letter_map =
-    letter_map.(num_of_char c) <- Some x
-
-  let overlay bottom top =
-    let result = Array.copy bottom in
-    Array.iteri top ~f:(fun i value ->
-      match value with
-      | (Some _) -> result.(i) <- value
-      | None -> ());
-    result
-
-
-  let to_seq letter_map =
-    letter_map |> Array.to_sequence |> Sequence.filter_mapi ~f:(fun i x -> 
-      Option.map x ~f:(fun item -> (char_of_num i, item)))
-end
-
 module Translation : sig
   type t
   val empty : t
@@ -160,9 +102,19 @@ end = struct
 end
 
 module Candidate_set : sig
-  type t
+  type tree = 
+    | Prefix of char * (char * tree) list
+    | Leaf of string
+
+  type t = {
+    candidates : tree;
+    word : string;
+    translation : Translation.t }
   val trim_with : Translation.t -> t -> t
   val singleton : string -> string -> t
+  val add_candidate_tree : tree -> char list -> char list -> string -> tree
+  val add_candidate_map : (char * tree) list -> char -> char list -> char list -> string -> (char * tree) list
+  val add_candidate : t -> string -> t
   val of_word_and_list : string -> string list -> t
   val to_seq : t -> string Sequence.t
   val crypto_word : t -> string
@@ -176,7 +128,7 @@ end = struct
    * because this is a cryptogram solver.
    *)
   type tree = 
-    | Prefix of char * tree Letter_map.t 
+    | Prefix of char * (char * tree) list
     | Leaf of string
 
   type t = {
@@ -187,16 +139,24 @@ end = struct
   let trim_with next_translation ({ translation; _ } as c_set) =
     { c_set with translation = Translation.overlay translation next_translation }
 
+  let rec map_find c = function
+    | (cand_char, next_tree)::tl ->
+        (match Char.compare cand_char c with
+        | x when x < 0 -> map_find c tl
+        | 0 -> Some next_tree
+        | _ -> None)
+    | [] -> None
+
   let rec to_seq ({ translation; candidates; word } as c_set) =
     match candidates with
     | Prefix (curr_crypto_char, map) -> (
         match Translation.decrypt translation curr_crypto_char with
-        | Some c -> 
-            (match Letter_map.get c map with
+        | Some c ->
+            (match map_find c map with
             | Some next_tree -> to_seq { c_set with candidates = next_tree }
             | None -> Sequence.empty)
         | None ->
-            map |> Letter_map.to_seq
+            map |> Sequence.of_list
             |> Sequence.filter_map ~f:(fun (c, tree) ->
                 match Translation.encrypt translation c with
                 | Some crypto_char when crypto_char <> curr_crypto_char -> None
@@ -207,33 +167,37 @@ end = struct
   let singleton_tree crypto_chars cand_chars candidate =
     List.zip_exn crypto_chars cand_chars
     |> List.fold_right ~init:(Leaf candidate) ~f:(fun (crypto_char, cand_char) acc -> 
-      let letter_map = Letter_map.empty () in
-      Letter_map.set cand_char acc letter_map;
-      Prefix (crypto_char, letter_map))
+      Prefix (crypto_char, [(cand_char, acc)]))
 
   let singleton crypto candidate = {
     candidates = singleton_tree (String.to_list crypto) (String.to_list candidate) candidate;
     word = crypto;
     translation = Translation.empty }
 
-  let add_candidate { word; candidates; translation } candidate =
+  let rec add_candidate_tree tree cand_chars crypto_chars candidate =
+      match (tree, cand_chars, crypto_chars) with
+      | (Prefix(c, letter_map), cand_hd::cand_tl, crypto_hd::crypto_tl) ->
+          Prefix(c, add_candidate_map letter_map cand_hd cand_tl crypto_tl candidate)
+      | _ -> failwith (sprintf "bad: %s %s %s" candidate (String.of_char_list cand_chars) (String.of_char_list crypto_chars))
+
+  and add_candidate_map letter_map cand_hd cand_tl crypto_tl candidate =
+    match letter_map with
+    | ((cand_char, next_tree)::tl) as curr_map ->
+        (match Char.compare cand_hd cand_char with
+        | x when x > 0 -> (cand_char, next_tree)::(add_candidate_map tl cand_hd cand_tl crypto_tl candidate)
+        | 0 -> (cand_char, add_candidate_tree next_tree cand_tl crypto_tl candidate)::tl
+        | _ -> (cand_hd, singleton_tree crypto_tl cand_tl candidate)::curr_map)
+    | [] -> [(cand_hd, singleton_tree crypto_tl cand_tl candidate)]
+
+  let add_candidate ({ word; candidates; translation } as c_set) candidate =
     let cand_chars = String.to_list candidate in
     let crypto_chars = String.to_list word in
-    let rec add_candidate' tree crypto_chars cand_chars =
-      match (tree, cand_chars, crypto_chars) with
-      | (Prefix(_, letter_map), cand_hd::cand_tl, crypto_hd::crypto_tl) ->
-          (match Letter_map.get cand_hd letter_map with
-          | Some next_tree -> add_candidate' next_tree crypto_tl cand_tl
-          | None -> letter_map |> Letter_map.set cand_hd (singleton_tree crypto_tl cand_tl candidate))
-      | _ -> failwith (sprintf "bad candidate: word %s; cand %s; word_p %s; cand_p %s" word candidate (String.of_char_list crypto_chars) (String.of_char_list cand_chars)) in
-    add_candidate' candidates crypto_chars cand_chars
+    { c_set with candidates = add_candidate_tree candidates cand_chars crypto_chars candidate }
 
   let of_word_and_list crypto candidates =
     match candidates with
     | hd::tl ->
-        let result : t = singleton crypto hd in
-        List.iter tl ~f:(add_candidate result);
-        result
+        List.fold tl ~f:add_candidate ~init:(singleton crypto hd)
     | [] -> failwith "cannot make a Candidate_set without any candidate words."
 
   let crypto_word { word; _ } = word
